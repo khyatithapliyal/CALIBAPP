@@ -1,0 +1,3 @@
+[console_scripts]
+calibapp = usnmexps.start_calib_app:main
+usnmapp = usnmexps.start_usnm_app:main

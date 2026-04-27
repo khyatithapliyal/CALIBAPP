@@ -1,0 +1,12 @@
+numpy
+scipy
+matplotlib
+pandas
+colorlog
+tqdm
+openpyxl
+pyperclip
+seaborn
+PyQt6
+networkx
+instrulink

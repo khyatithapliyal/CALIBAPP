@@ -1,3 +1,36 @@
+Metadata-Version: 2.4
+Name: usnmexps
+Version: 1.1
+Summary: Code base for the preparation and execution of USNM experiments
+Author: Théo Lemaire
+Author-email: theo.lemaire1@gmail.com
+License: MIT
+Keywords: USNM ultrasound neuromodulation
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Scientific/Engineering :: Physics
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: pandas
+Requires-Dist: colorlog
+Requires-Dist: tqdm
+Requires-Dist: openpyxl
+Requires-Dist: pyperclip
+Requires-Dist: seaborn
+Requires-Dist: PyQt6
+Requires-Dist: networkx
+Requires-Dist: instrulink
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: keywords
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: summary
+
 # USNM experiments
 
 Code base for the preparation and execution of USNM experiments

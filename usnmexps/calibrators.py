@@ -43,7 +43,7 @@ class Calibrator:
     CPL_KEY = 'cpl'
     CPL_FWD_KEY = 'cpl_fwd'
     CPL_REV_KEY = 'cpl_rev'
-    ACQ_RATE_CHECK_DONE = False
+    ACQ_RATE_CHECK_DONE = False  # whether the one-time acquisition-rate benchmark has run
 
     def __init__(self, wg, scope, f, wch_sig, sch_sig, 
                  wch_trig=None, sch_trig=None, sch_cpl_fwd=None, sch_cpl_rev=None,
@@ -114,6 +114,43 @@ class Calibrator:
         if self.testmode:
             self.tmock, self.ymock = self.generate_mock_waveform()
             self.Amock = 1.
+        self.efficiency_monitor = EfficiencyMonitor()
+    @classmethod
+    def create_for_burst_check(cls, wg, scope, f, wch_trig=STIM_CH_TRIG, wch_sig=STIM_CH_SIGNAL,
+                               sch_cpl_fwd=ACQ_CH_CPLFWD, sch_cpl_rev=ACQ_CH_CPLREV,
+                               sch_sig=None, testmode=False, **kwargs):
+        '''
+        Create a minimal Calibrator instance configured for burst efficiency checks.
+        
+        This factory method provides a convenient way to create a Calibrator from
+        the USNM experiment app (or any other context) without needing to specify
+        all the GUI-related calibration parameters.
+        
+        :param wg: waveform generator object
+        :param scope: oscilloscope object
+        :param f: carrier frequency (Hz)
+        :param wch_trig: waveform generator trigger channel (default: 1)
+        :param wch_sig: waveform generator signal channel (default: 2)
+        :param sch_cpl_fwd: oscilloscope forward coupling channel (default: 3)
+        :param sch_cpl_rev: oscilloscope reverse coupling channel (default: 4)
+        :param sch_sig: oscilloscope signal channel (default: None, no hydrophone)
+        :param testmode: whether to run in test mode
+        :return: Calibrator instance ready for run_burst_efficiency_check()
+        '''
+        return cls(
+            wg=wg,
+            scope=scope,
+            f=f,
+            wch_sig=wch_sig,
+            sch_sig=sch_sig,
+            wch_trig=wch_trig,
+            sch_cpl_fwd=sch_cpl_fwd,
+            sch_cpl_rev=sch_cpl_rev,
+            trigger_mode='single',
+            testmode=testmode,
+            plot=False,
+            **kwargs
+        )
 
     @property
     def f(self):
@@ -365,13 +402,13 @@ class Calibrator:
         
         # Check that sampling rate allows to acquire waveform details
         self.check_sample_rate()
-
+        
         # Set a specific number of points & sweeps per acquisition
         self.scope.set_waveform_settings(npoints=acq_npoints)
         self.scope.set_nsweeps_per_acquisition(acq_nsweeps)
         self.scope.hide_menu()
 
-        # Run a one-time practical acquisition/refresh rate benchmark.
+        # Run a one-time practical acquisition/refresh-rate benchmark (passive: logs only).
         if not self.testmode and not Calibrator.ACQ_RATE_CHECK_DONE:
             try:
                 self.check_acquisition_rate(
@@ -792,9 +829,39 @@ class Calibrator:
         # If "prog" trigger mode, reset scope trigger mode to "normal"
         if self.trigger_mode == 'prog' and not self.testmode:
             self.scope.set_normal_trigger()
+
+    def setup_efficiency_monitoring(self, calibration_data, vpp):
+        """
+        Set up efficiency monitoring with references from calibration data.
+        Call this before running check_efficiency.
+        
+        :param calibration_data: DataFrame with historical calibration
+        :param vpp: Current voltage setting (Vpp)
+        """
+        try:
+            coupling_db, fwd_v, rev_v = get_coupling_reference_from_calibration(
+                calibration_data, vpp)
+            
+            # Try to get pressure reference if available
+            try:
+                from .efficiency_monitor import get_pressure_reference_from_calibration
+                pressure = get_pressure_reference_from_calibration(calibration_data, vpp)
+            except (ValueError, KeyError):
+                pressure = None
+            
+            self.efficiency_monitor.set_references(
+                coupling_db=coupling_db,
+                pressure_mpa=pressure,
+                fwd_v=fwd_v
+            )
+        
+        except Exception as e:
+            logger.warning(f'Could not set efficiency references: {e}')
+
+        
     
     def run_acquisition(self, Vpp, acq_interval=OSC_ACQ_INTERVAL, adjust_scope_vscale=True, 
-                        max_iter=None,**kwargs):
+                        max_iter=None, on_pulse_callback=None ,**kwargs):
         ''' 
         Run continuous or finite acquisition
         
@@ -845,6 +912,10 @@ class Calibrator:
                 # Acquire and process waveform, and extract output amplitude(s)
                 yamps = self.acquire_and_process(tstim)
 
+                # KT: Call efficiency monitor callback if provided (real-time monitoring)
+                if on_pulse_callback is not None and self.has_coupling_channels:
+                    on_pulse_callback(cpl_fwd=yamps[self.CPL_FWD_KEY], cpl_rev=yamps[self.CPL_REV_KEY])
+
                 # If specified, adjust scope vertical scale(s) to detected signal amplitude(s)
                 if not self.testmode and adjust_scope_vscale:
                     if self.has_signal_channel:
@@ -866,6 +937,16 @@ class Calibrator:
                 if self.has_coupling_channels:
                     cplratio = yamps[self.CPL_REV_KEY] / yamps[self.CPL_FWD_KEY]
                     s.append(f'coupling ratio = {cplratio:.3f} ({vratio_to_gain(cplratio):.1f} dB)')
+
+                    # Efficiency monitor: track deviations from reference
+                    pressure = yamps.get(self.SIG_KEY, None)
+                    self.efficiency_monitor.check_pulse(
+                        fwd_v=yamps[self.CPL_FWD_KEY],
+                        rev_v=yamps[self.CPL_REV_KEY],
+                        pressure_mpa=pressure,
+                        pulse_num=len(self.efficiency_monitor.measurements) + 1
+                    )
+
                 logger.info(', '.join(s))
 
                 # Increment iteration counter
@@ -887,7 +968,7 @@ class Calibrator:
 
     def run_burst_efficiency_check(self, Vpp, BD=0.2, PRF=100, DC=50, n_bursts=5, 
                                     pulse_to_sample=10, acq_interval=1.0, plot=True,
-                                    n_warmup=2):
+                                    n_warmup=1):
         '''
         Run burst efficiency check via the reusable orchestration module.
 
